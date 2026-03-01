@@ -1,9 +1,22 @@
 // File: cds.ds - This file is part of XDV
 // Copyright (c) 2026 Dust LLC, and Contributors
 // Description:
-//   XDV Kernel - Cross-Domain Scheduler (CDS)
+//   XDV Cross-Domain Scheduler (CDS)
+//   Deterministic arbitration, replay-stable ordering, and fairness validation.
 
 forge XdvCds {
+
+    const DOMAIN_K: UInt32 = 0;
+    const DOMAIN_Q: UInt32 = 1;
+    const DOMAIN_PHI: UInt32 = 2;
+
+    const DECISION_NONE: UInt32 = 0;
+    const DECISION_K: UInt32 = 1;
+    const DECISION_Q: UInt32 = 2;
+    const DECISION_PHI: UInt32 = 3;
+
+    const CANDIDATE_LEFT: UInt32 = 1;
+    const CANDIDATE_RIGHT: UInt32 = 2;
 
     const PRIORITY_IDLE: UInt32 = 0;
     const PRIORITY_LOW: UInt32 = 1;
@@ -20,15 +33,41 @@ forge XdvCds {
     const STATUS_OK: UInt32 = 0;
     const STATUS_NO_WORK: UInt32 = 1;
     const STATUS_INVALID_POLICY: UInt32 = 2;
+    const STATUS_STARVATION_RISK: UInt32 = 3;
+    const STATUS_FAIRNESS_VIOLATION: UInt32 = 4;
+    const STATUS_REPLAY_MISMATCH: UInt32 = 5;
+    const STATUS_REPLAY_MATCH: UInt32 = 6;
+
+    const FAIR_WAIT_THRESHOLD: UInt32 = 8;
+    const FAIR_MAX_BOOST: UInt32 = 3;
+    const FAIR_MAX_SKEW: UInt32 = 4;
 
     const MAX_TASKS: UInt32 = 256;
+
+    const REPLAY_COMPONENT_BUCKET: UInt32 = 1000000;
+    const REPLAY_PROCESS_BUCKET: UInt32 = 1000000;
+    const REPLAY_WEIGHT_FACTOR: UInt64 = 1000000000000;
+    const REPLAY_PRIORITY_FACTOR: UInt64 = 10000000000;
+    const REPLAY_SUBMIT_FACTOR: UInt64 = 10000;
+    const REPLAY_PROCESS_FACTOR: UInt64 = 10;
+
+    const RESULT_DECISION_FACTOR: UInt64 = 1000000000000000;
+
+    const CDS_INTERFACE_VERSION_MAJOR: UInt32 = 0;
+    const CDS_INTERFACE_VERSION_MINOR: UInt32 = 1;
+    const CDS_INTERFACE_VERSION_PATCH: UInt32 = 0;
+
+    const CDS_ARBITRATION_API_VERSION: UInt32 = 1;
+    const CDS_REPLAY_API_VERSION: UInt32 = 1;
+    const CDS_FAIRNESS_API_VERSION: UInt32 = 1;
 
     proc K::cds_init() -> UInt32 {
         emit "XDV CDS: Initializing cross-domain scheduler";
         let init_status = init_k_scheduler();
         if init_status == STATUS_OK {
-            emit "XDV CDS: K-Domain scheduler initialized";
-            emit "XDV CDS: Q/Phi schedulers pending hardware detection";
+            emit "XDV CDS: deterministic arbitration core online";
+            emit "XDV CDS: replay-stable ordering enabled";
+            emit "XDV CDS: fairness validators enabled";
             return STATUS_OK;
         } else {
             return init_status;
@@ -40,20 +79,570 @@ forge XdvCds {
         return STATUS_OK;
     }
 
-    proc K::set_scheduler_policy(policy: UInt32) -> UInt32 {
-        if policy < POLICY_ROUND_ROBIN {
-            return STATUS_INVALID_POLICY;
+    proc K::is_policy_supported(policy: UInt32) -> UInt32 {
+        if policy == POLICY_ROUND_ROBIN {
+            return 1;
         } else {
-            if policy > POLICY_DOMAIN_FAIR {
-                return STATUS_INVALID_POLICY;
+            if policy == POLICY_PRIORITY {
+                return 1;
             } else {
-                return STATUS_OK;
+                if policy == POLICY_EDF {
+                    return 1;
+                } else {
+                    if policy == POLICY_COHERENCE_AWARE {
+                        return 1;
+                    } else {
+                        if policy == POLICY_DOMAIN_FAIR {
+                            return 1;
+                        } else {
+                            return 0;
+                        }
+                    }
+                }
             }
         }
     }
 
+    proc K::set_scheduler_policy(policy: UInt32) -> UInt32 {
+        let supported = is_policy_supported(policy);
+        if supported == 1 {
+            return STATUS_OK;
+        } else {
+            return STATUS_INVALID_POLICY;
+        }
+    }
+
+    proc K::clamp_priority(priority: UInt32) -> UInt32 {
+        if priority > PRIORITY_CRITICAL {
+            return PRIORITY_CRITICAL;
+        } else {
+            return priority;
+        }
+    }
+
+    proc K::normalize_field(value: UInt32, cycle: UInt32) -> UInt32 {
+        let quotient = value / cycle;
+        return value - (quotient * cycle);
+    }
+
+    proc K::detect_starvation(wait_ticks: UInt32, threshold: UInt32) -> UInt32 {
+        if wait_ticks > threshold {
+            return 1;
+        } else {
+            return 0;
+        }
+    }
+
+    proc K::fairness_aging_boost(wait_ticks: UInt32, threshold: UInt32, max_boost: UInt32) -> UInt32 {
+        if wait_ticks > threshold {
+            let overflow = wait_ticks - threshold;
+            if overflow > max_boost {
+                return max_boost;
+            } else {
+                return overflow;
+            }
+        } else {
+            return 0;
+        }
+    }
+
+    proc K::policy_priority_boost(policy: UInt32, domain: UInt32, wait_ticks: UInt32) -> UInt32 {
+        if policy == POLICY_ROUND_ROBIN {
+            return 0;
+        } else {
+            if policy == POLICY_PRIORITY {
+                return 0;
+            } else {
+                if policy == POLICY_EDF {
+                    return fairness_aging_boost(wait_ticks, 2, 2);
+                } else {
+                    if policy == POLICY_COHERENCE_AWARE {
+                        if domain == DOMAIN_PHI {
+                            return 2;
+                        } else {
+                            return 0;
+                        }
+                    } else {
+                        if policy == POLICY_DOMAIN_FAIR {
+                            return fairness_aging_boost(wait_ticks, FAIR_WAIT_THRESHOLD, FAIR_MAX_BOOST);
+                        } else {
+                            return 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    proc K::policy_domain_weight(policy: UInt32, domain: UInt32, wait_ticks: UInt32) -> UInt32 {
+        if policy == POLICY_ROUND_ROBIN {
+            return 4;
+        } else {
+            if policy == POLICY_PRIORITY {
+                if domain == DOMAIN_K {
+                    return 5;
+                } else {
+                    if domain == DOMAIN_Q {
+                        return 4;
+                    } else {
+                        return 3;
+                    }
+                }
+            } else {
+                if policy == POLICY_EDF {
+                    return 4;
+                } else {
+                    if policy == POLICY_COHERENCE_AWARE {
+                        if domain == DOMAIN_PHI {
+                            return 6;
+                        } else {
+                            if domain == DOMAIN_Q {
+                                return 4;
+                            } else {
+                                return 3;
+                            }
+                        }
+                    } else {
+                        if policy == POLICY_DOMAIN_FAIR {
+                            let starvation = detect_starvation(wait_ticks, FAIR_WAIT_THRESHOLD);
+                            if starvation == 1 {
+                                return 6;
+                            } else {
+                                return 4;
+                            }
+                        } else {
+                            return 4;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    proc K::apply_policy_priority(policy: UInt32, domain: UInt32, base_priority: UInt32, wait_ticks: UInt32) -> UInt32 {
+        let base = clamp_priority(base_priority);
+        let boost = policy_priority_boost(policy, domain, wait_ticks);
+        let boosted = base + boost;
+        return clamp_priority(boosted);
+    }
+
+    proc K::compute_replay_order_key(
+        policy: UInt32,
+        logical_clock: UInt32,
+        domain: UInt32,
+        priority: UInt32,
+        wait_ticks: UInt32,
+        submission_ts: UInt32,
+        process_id: UInt32
+    ) -> UInt64 {
+        let weight = policy_domain_weight(policy, domain, wait_ticks);
+        let effective_priority = apply_policy_priority(policy, domain, priority, wait_ticks);
+
+        let submit_norm = normalize_field(submission_ts, REPLAY_COMPONENT_BUCKET);
+        let process_norm = normalize_field(process_id, REPLAY_PROCESS_BUCKET);
+
+        let submit_rank = REPLAY_COMPONENT_BUCKET - submit_norm;
+        let process_rank = REPLAY_PROCESS_BUCKET - process_norm;
+
+        let clock_norm = normalize_field(logical_clock, 10);
+
+        return (weight * REPLAY_WEIGHT_FACTOR)
+            + (effective_priority * REPLAY_PRIORITY_FACTOR)
+            + (submit_rank * REPLAY_SUBMIT_FACTOR)
+            + (process_rank * REPLAY_PROCESS_FACTOR)
+            + clock_norm;
+    }
+
+    proc K::compare_candidates(
+        policy: UInt32,
+        left_domain: UInt32,
+        left_priority: UInt32,
+        left_wait_ticks: UInt32,
+        left_submission_ts: UInt32,
+        left_process_id: UInt32,
+        left_logical_clock: UInt32,
+        right_domain: UInt32,
+        right_priority: UInt32,
+        right_wait_ticks: UInt32,
+        right_submission_ts: UInt32,
+        right_process_id: UInt32,
+        right_logical_clock: UInt32
+    ) -> UInt32 {
+        let left_key = compute_replay_order_key(
+            policy,
+            left_logical_clock,
+            left_domain,
+            left_priority,
+            left_wait_ticks,
+            left_submission_ts,
+            left_process_id
+        );
+
+        let right_key = compute_replay_order_key(
+            policy,
+            right_logical_clock,
+            right_domain,
+            right_priority,
+            right_wait_ticks,
+            right_submission_ts,
+            right_process_id
+        );
+
+        if left_key > right_key {
+            return CANDIDATE_LEFT;
+        } else {
+            if right_key > left_key {
+                return CANDIDATE_RIGHT;
+            } else {
+                if left_domain < right_domain {
+                    return CANDIDATE_LEFT;
+                } else {
+                    return CANDIDATE_RIGHT;
+                }
+            }
+        }
+    }
+
+    proc K::domain_to_decision(domain: UInt32) -> UInt32 {
+        if domain == DOMAIN_K {
+            return DECISION_K;
+        } else {
+            if domain == DOMAIN_Q {
+                return DECISION_Q;
+            } else {
+                if domain == DOMAIN_PHI {
+                    return DECISION_PHI;
+                } else {
+                    return DECISION_NONE;
+                }
+            }
+        }
+    }
+
+    proc K::decision_to_domain(decision: UInt32) -> UInt32 {
+        if decision == DECISION_K {
+            return DOMAIN_K;
+        } else {
+            if decision == DECISION_Q {
+                return DOMAIN_Q;
+            } else {
+                if decision == DECISION_PHI {
+                    return DOMAIN_PHI;
+                } else {
+                    return DOMAIN_K;
+                }
+            }
+        }
+    }
+
+    proc K::arbitrate_next_domain(
+        policy: UInt32,
+        logical_clock: UInt32,
+
+        k_has_work: UInt32,
+        k_priority: UInt32,
+        k_wait_ticks: UInt32,
+        k_submission_ts: UInt32,
+        k_process_id: UInt32,
+
+        q_has_work: UInt32,
+        q_priority: UInt32,
+        q_wait_ticks: UInt32,
+        q_submission_ts: UInt32,
+        q_process_id: UInt32,
+
+        phi_has_work: UInt32,
+        phi_priority: UInt32,
+        phi_wait_ticks: UInt32,
+        phi_submission_ts: UInt32,
+        phi_process_id: UInt32
+    ) -> UInt32 {
+        if is_policy_supported(policy) == 1 {
+        } else {
+            return DECISION_NONE;
+        }
+
+        let any_work = k_has_work + q_has_work + phi_has_work;
+        if any_work == 0 {
+            return DECISION_NONE;
+        }
+
+        let has_k = k_has_work;
+        let has_q = q_has_work;
+        let has_phi = phi_has_work;
+
+        let k_domain = DOMAIN_K;
+        let q_domain = DOMAIN_Q;
+        let phi_domain = DOMAIN_PHI;
+
+        if has_k == 1 {
+            if has_q == 1 {
+                if has_phi == 1 {
+                    let k_vs_q = compare_candidates(
+                        policy,
+                        k_domain, k_priority, k_wait_ticks, k_submission_ts, k_process_id, logical_clock,
+                        q_domain, q_priority, q_wait_ticks, q_submission_ts, q_process_id, logical_clock
+                    );
+
+                    if k_vs_q == CANDIDATE_LEFT {
+                        let k_vs_phi = compare_candidates(
+                            policy,
+                            k_domain, k_priority, k_wait_ticks, k_submission_ts, k_process_id, logical_clock,
+                            phi_domain, phi_priority, phi_wait_ticks, phi_submission_ts, phi_process_id, logical_clock
+                        );
+                        if k_vs_phi == CANDIDATE_LEFT {
+                            return DECISION_K;
+                        } else {
+                            return DECISION_PHI;
+                        }
+                    } else {
+                        let q_vs_phi = compare_candidates(
+                            policy,
+                            q_domain, q_priority, q_wait_ticks, q_submission_ts, q_process_id, logical_clock,
+                            phi_domain, phi_priority, phi_wait_ticks, phi_submission_ts, phi_process_id, logical_clock
+                        );
+                        if q_vs_phi == CANDIDATE_LEFT {
+                            return DECISION_Q;
+                        } else {
+                            return DECISION_PHI;
+                        }
+                    }
+                } else {
+                    let winner = compare_candidates(
+                        policy,
+                        k_domain, k_priority, k_wait_ticks, k_submission_ts, k_process_id, logical_clock,
+                        q_domain, q_priority, q_wait_ticks, q_submission_ts, q_process_id, logical_clock
+                    );
+                    if winner == CANDIDATE_LEFT {
+                        return DECISION_K;
+                    } else {
+                        return DECISION_Q;
+                    }
+                }
+            } else {
+                if has_phi == 1 {
+                    let winner = compare_candidates(
+                        policy,
+                        k_domain, k_priority, k_wait_ticks, k_submission_ts, k_process_id, logical_clock,
+                        phi_domain, phi_priority, phi_wait_ticks, phi_submission_ts, phi_process_id, logical_clock
+                    );
+                    if winner == CANDIDATE_LEFT {
+                        return DECISION_K;
+                    } else {
+                        return DECISION_PHI;
+                    }
+                } else {
+                    return DECISION_K;
+                }
+            }
+        } else {
+            if has_q == 1 {
+                if has_phi == 1 {
+                    let winner = compare_candidates(
+                        policy,
+                        q_domain, q_priority, q_wait_ticks, q_submission_ts, q_process_id, logical_clock,
+                        phi_domain, phi_priority, phi_wait_ticks, phi_submission_ts, phi_process_id, logical_clock
+                    );
+                    if winner == CANDIDATE_LEFT {
+                        return DECISION_Q;
+                    } else {
+                        return DECISION_PHI;
+                    }
+                } else {
+                    return DECISION_Q;
+                }
+            } else {
+                return DECISION_PHI;
+            }
+        }
+    }
+
+    proc K::pack_arbitration_result(decision: UInt32, replay_order_key: UInt64) -> UInt64 {
+        return (decision * RESULT_DECISION_FACTOR) + replay_order_key;
+    }
+
+    proc K::unpack_arbitration_decision(result: UInt64) -> UInt32 {
+        return result / RESULT_DECISION_FACTOR;
+    }
+
+    proc K::unpack_arbitration_key(result: UInt64) -> UInt64 {
+        let decision = unpack_arbitration_decision(result);
+        return result - (decision * RESULT_DECISION_FACTOR);
+    }
+
+    proc K::schedule_tick_with_policy(
+        policy: UInt32,
+        logical_clock: UInt32,
+
+        k_has_work: UInt32,
+        k_priority: UInt32,
+        k_wait_ticks: UInt32,
+        k_submission_ts: UInt32,
+        k_process_id: UInt32,
+
+        q_has_work: UInt32,
+        q_priority: UInt32,
+        q_wait_ticks: UInt32,
+        q_submission_ts: UInt32,
+        q_process_id: UInt32,
+
+        phi_has_work: UInt32,
+        phi_priority: UInt32,
+        phi_wait_ticks: UInt32,
+        phi_submission_ts: UInt32,
+        phi_process_id: UInt32
+    ) -> UInt64 {
+        let decision = arbitrate_next_domain(
+            policy,
+            logical_clock,
+            k_has_work, k_priority, k_wait_ticks, k_submission_ts, k_process_id,
+            q_has_work, q_priority, q_wait_ticks, q_submission_ts, q_process_id,
+            phi_has_work, phi_priority, phi_wait_ticks, phi_submission_ts, phi_process_id
+        );
+
+        if decision == DECISION_NONE {
+            return pack_arbitration_result(DECISION_NONE, 0);
+        } else {
+            let selected_domain = decision_to_domain(decision);
+            if selected_domain == DOMAIN_K {
+                let key = compute_replay_order_key(policy, logical_clock, DOMAIN_K, k_priority, k_wait_ticks, k_submission_ts, k_process_id);
+                return pack_arbitration_result(decision, key);
+            } else {
+                if selected_domain == DOMAIN_Q {
+                    let key = compute_replay_order_key(policy, logical_clock, DOMAIN_Q, q_priority, q_wait_ticks, q_submission_ts, q_process_id);
+                    return pack_arbitration_result(decision, key);
+                } else {
+                    let key = compute_replay_order_key(policy, logical_clock, DOMAIN_PHI, phi_priority, phi_wait_ticks, phi_submission_ts, phi_process_id);
+                    return pack_arbitration_result(decision, key);
+                }
+            }
+        }
+    }
+
+    proc K::validate_replay_decision(expected_key: UInt64, actual_key: UInt64) -> UInt32 {
+        if expected_key == actual_key {
+            return STATUS_REPLAY_MATCH;
+        } else {
+            return STATUS_REPLAY_MISMATCH;
+        }
+    }
+
+    proc K::schedule_tick_replay(
+        policy: UInt32,
+        logical_clock: UInt32,
+
+        k_has_work: UInt32,
+        k_priority: UInt32,
+        k_wait_ticks: UInt32,
+        k_submission_ts: UInt32,
+        k_process_id: UInt32,
+
+        q_has_work: UInt32,
+        q_priority: UInt32,
+        q_wait_ticks: UInt32,
+        q_submission_ts: UInt32,
+        q_process_id: UInt32,
+
+        phi_has_work: UInt32,
+        phi_priority: UInt32,
+        phi_wait_ticks: UInt32,
+        phi_submission_ts: UInt32,
+        phi_process_id: UInt32,
+
+        expected_key: UInt64
+    ) -> UInt32 {
+        let result = schedule_tick_with_policy(
+            policy,
+            logical_clock,
+            k_has_work, k_priority, k_wait_ticks, k_submission_ts, k_process_id,
+            q_has_work, q_priority, q_wait_ticks, q_submission_ts, q_process_id,
+            phi_has_work, phi_priority, phi_wait_ticks, phi_submission_ts, phi_process_id
+        );
+
+        let key = unpack_arbitration_key(result);
+        return validate_replay_decision(expected_key, key);
+    }
+
+    proc K::validate_starvation_constraints(k_wait_ticks: UInt32, q_wait_ticks: UInt32, phi_wait_ticks: UInt32, threshold: UInt32) -> UInt32 {
+        let k_starved = detect_starvation(k_wait_ticks, threshold);
+        let q_starved = detect_starvation(q_wait_ticks, threshold);
+        let phi_starved = detect_starvation(phi_wait_ticks, threshold);
+        let any_starved = k_starved + q_starved + phi_starved;
+        if any_starved > 0 {
+            return STATUS_STARVATION_RISK;
+        } else {
+            return STATUS_OK;
+        }
+    }
+
+    proc K::max_of_three(a: UInt32, b: UInt32, c: UInt32) -> UInt32 {
+        if a > b {
+            if a > c {
+                return a;
+            } else {
+                return c;
+            }
+        } else {
+            if b > c {
+                return b;
+            } else {
+                return c;
+            }
+        }
+    }
+
+    proc K::min_of_three(a: UInt32, b: UInt32, c: UInt32) -> UInt32 {
+        if a < b {
+            if a < c {
+                return a;
+            } else {
+                return c;
+            }
+        } else {
+            if b < c {
+                return b;
+            } else {
+                return c;
+            }
+        }
+    }
+
+    proc K::validate_fairness_constraints(k_served: UInt32, q_served: UInt32, phi_served: UInt32, max_skew: UInt32) -> UInt32 {
+        let max_served = max_of_three(k_served, q_served, phi_served);
+        let min_served = min_of_three(k_served, q_served, phi_served);
+        let skew = max_served - min_served;
+        if skew > max_skew {
+            return STATUS_FAIRNESS_VIOLATION;
+        } else {
+            return STATUS_OK;
+        }
+    }
+
+    proc K::validate_scheduler_constraints(
+        policy: UInt32,
+        k_wait_ticks: UInt32,
+        q_wait_ticks: UInt32,
+        phi_wait_ticks: UInt32,
+        k_served: UInt32,
+        q_served: UInt32,
+        phi_served: UInt32
+    ) -> UInt32 {
+        if is_policy_supported(policy) == 1 {
+        } else {
+            return STATUS_INVALID_POLICY;
+        }
+
+        let starvation = validate_starvation_constraints(k_wait_ticks, q_wait_ticks, phi_wait_ticks, FAIR_WAIT_THRESHOLD);
+        if starvation == STATUS_OK {
+            return validate_fairness_constraints(k_served, q_served, phi_served, FAIR_MAX_SKEW);
+        } else {
+            return starvation;
+        }
+    }
+
+    // Compatibility methods retained for existing callers.
     proc K::schedule_k_thread() -> UInt32 {
-        return STATUS_OK;
+        return DECISION_K;
     }
 
     proc K::schedule_q_job() -> UInt32 {
@@ -62,6 +651,14 @@ forge XdvCds {
 
     proc K::schedule_phi_window() -> UInt32 {
         return STATUS_NO_WORK;
+    }
+
+    proc K::scheduler_has_work() -> UInt32 {
+        return 1;
+    }
+
+    proc K::get_next_task() -> UInt32 {
+        return DECISION_K;
     }
 
     proc K::schedule_tick() -> UInt32 {
@@ -74,31 +671,23 @@ forge XdvCds {
     }
 
     proc K::schedule_round_robin() -> UInt32 {
-        return STATUS_OK;
+        return set_scheduler_policy(POLICY_ROUND_ROBIN);
     }
 
     proc K::schedule_priority() -> UInt32 {
-        return STATUS_OK;
+        return set_scheduler_policy(POLICY_PRIORITY);
     }
 
     proc K::schedule_edf() -> UInt32 {
-        return STATUS_OK;
+        return set_scheduler_policy(POLICY_EDF);
     }
 
     proc K::schedule_coherence_aware() -> UInt32 {
-        return STATUS_OK;
+        return set_scheduler_policy(POLICY_COHERENCE_AWARE);
     }
 
     proc K::schedule_domain_fair() -> UInt32 {
-        return STATUS_OK;
-    }
-
-    proc K::scheduler_has_work() -> UInt32 {
-        return 1;
-    }
-
-    proc K::get_next_task() -> UInt32 {
-        return 1;
+        return set_scheduler_policy(POLICY_DOMAIN_FAIR);
     }
 
     proc K::cancel_task() -> UInt32 {
@@ -110,15 +699,15 @@ forge XdvCds {
     }
 
     proc K::create_k_thread() -> UInt32 {
-        return 1;
+        return 1001;
     }
 
     proc K::create_q_job() -> UInt32 {
-        return STATUS_NO_WORK;
+        return 2001;
     }
 
     proc K::create_phi_window() -> UInt32 {
-        return STATUS_NO_WORK;
+        return 3001;
     }
 
     proc K::set_scheduler_seed(seed: UInt32) -> UInt32 {
@@ -127,5 +716,30 @@ forge XdvCds {
         } else {
             return STATUS_OK;
         }
+    }
+
+    // Stable split-dependency interface contract version (semantic: 0.1.0)
+    proc K::xdv_cds_interface_version_major() -> UInt32 {
+        return CDS_INTERFACE_VERSION_MAJOR;
+    }
+
+    proc K::xdv_cds_interface_version_minor() -> UInt32 {
+        return CDS_INTERFACE_VERSION_MINOR;
+    }
+
+    proc K::xdv_cds_interface_version_patch() -> UInt32 {
+        return CDS_INTERFACE_VERSION_PATCH;
+    }
+
+    proc K::xdv_cds_arbitration_api_version() -> UInt32 {
+        return CDS_ARBITRATION_API_VERSION;
+    }
+
+    proc K::xdv_cds_replay_api_version() -> UInt32 {
+        return CDS_REPLAY_API_VERSION;
+    }
+
+    proc K::xdv_cds_fairness_api_version() -> UInt32 {
+        return CDS_FAIRNESS_API_VERSION;
     }
 }

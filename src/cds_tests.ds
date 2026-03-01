@@ -1,42 +1,205 @@
 // File: cds_tests.ds - This file is part of XDV
 // Copyright (c) 2026 Dust LLC, and Contributors
 // Description:
-//   XDV Kernel - CDS Tests
+//   XDV CDS tests for deterministic arbitration, replay stability, and fairness checks.
 
 forge CdsTests {
 
-    proc K::test_priority_constants() {
-        let a = 1;
-        let b = 2;
-        return 0;
+    const TEST_PASS: UInt32 = 0;
+    const TEST_FAIL: UInt32 = 1;
+
+    const STATUS_OK: UInt32 = 0;
+    const STATUS_INVALID_POLICY: UInt32 = 2;
+    const STATUS_STARVATION_RISK: UInt32 = 3;
+    const STATUS_FAIRNESS_VIOLATION: UInt32 = 4;
+    const STATUS_REPLAY_MISMATCH: UInt32 = 5;
+    const STATUS_REPLAY_MATCH: UInt32 = 6;
+
+    const POLICY_ROUND_ROBIN: UInt32 = 1;
+    const POLICY_PRIORITY: UInt32 = 2;
+    const POLICY_DOMAIN_FAIR: UInt32 = 5;
+
+    const DOMAIN_K: UInt32 = 0;
+
+    const DECISION_K: UInt32 = 1;
+    const DECISION_Q: UInt32 = 2;
+
+    proc K::expect_status(actual: UInt32, expected: UInt32) -> UInt32 {
+        if actual == expected {
+            return TEST_PASS;
+        } else {
+            return TEST_FAIL;
+        }
     }
 
-    proc K::test_schedule_policy_enum() {
-        return 0;
+    proc K::test_policy_validation_accepts_known_policies() -> UInt32 {
+        let a = set_scheduler_policy(POLICY_ROUND_ROBIN);
+        if a == STATUS_OK {
+            let b = set_scheduler_policy(POLICY_PRIORITY);
+            if b == STATUS_OK {
+                let c = set_scheduler_policy(POLICY_DOMAIN_FAIR);
+                if c == STATUS_OK {
+                    return TEST_PASS;
+                } else {
+                    return TEST_FAIL;
+                }
+            } else {
+                return TEST_FAIL;
+            }
+        } else {
+            return TEST_FAIL;
+        }
     }
 
-    proc K::test_task_status_enum() {
-        return 0;
+    proc K::test_policy_validation_rejects_unknown_policy() -> UInt32 {
+        let status = set_scheduler_policy(99);
+        return expect_status(status, STATUS_INVALID_POLICY);
     }
 
-    proc K::test_schedule_constraint_enum() {
-        return 0;
+    proc K::test_replay_order_key_is_stable_for_same_input() -> UInt32 {
+        let key_a = compute_replay_order_key(POLICY_ROUND_ROBIN, 100, DOMAIN_K, 2, 4, 40, 19);
+        let key_b = compute_replay_order_key(POLICY_ROUND_ROBIN, 100, DOMAIN_K, 2, 4, 40, 19);
+        if key_a == key_b {
+            return TEST_PASS;
+        } else {
+            return TEST_FAIL;
+        }
     }
 
-    proc K::test_create_k_thread() {
-        return 0;
+    proc K::test_replay_validate_detects_mismatch() -> UInt32 {
+        let status = validate_replay_decision(1001, 1002);
+        return expect_status(status, STATUS_REPLAY_MISMATCH);
     }
 
-    proc K::test_create_q_job() {
-        return 0;
+    proc K::test_replay_validate_detects_match() -> UInt32 {
+        let status = validate_replay_decision(1001, 1001);
+        return expect_status(status, STATUS_REPLAY_MATCH);
     }
 
-    proc K::test_create_phi_window() {
-        return 0;
+    proc K::test_arbitration_prefers_higher_priority() -> UInt32 {
+        let decision = arbitrate_next_domain(
+            POLICY_PRIORITY,
+            200,
+            1, 4, 1, 10, 33,
+            1, 1, 1, 10, 34,
+            0, 0, 0, 0, 0
+        );
+        return expect_status(decision, DECISION_K);
     }
 
-    proc K::test_scheduler_has_work_initially_false() {
-        return 0;
+    proc K::test_arbitration_tiebreak_is_replay_stable() -> UInt32 {
+        let decision = arbitrate_next_domain(
+            POLICY_DOMAIN_FAIR,
+            300,
+            1, 2, 4, 20, 50,
+            1, 2, 4, 20, 51,
+            0, 0, 0, 0, 0
+        );
+        return expect_status(decision, DECISION_K);
     }
 
+    proc K::test_domain_fair_policy_boosts_starved_domain() -> UInt32 {
+        let decision = arbitrate_next_domain(
+            POLICY_DOMAIN_FAIR,
+            400,
+            1, 2, 2, 30, 60,
+            1, 2, 20, 30, 61,
+            0, 0, 0, 0, 0
+        );
+        return expect_status(decision, DECISION_Q);
+    }
+
+    proc K::test_starvation_validator_detects_risk() -> UInt32 {
+        let status = validate_starvation_constraints(2, 15, 1, 8);
+        return expect_status(status, STATUS_STARVATION_RISK);
+    }
+
+    proc K::test_starvation_validator_passes_safe_waits() -> UInt32 {
+        let status = validate_starvation_constraints(2, 3, 1, 8);
+        return expect_status(status, STATUS_OK);
+    }
+
+    proc K::test_fairness_validator_detects_violation() -> UInt32 {
+        let status = validate_fairness_constraints(20, 9, 8, 4);
+        return expect_status(status, STATUS_FAIRNESS_VIOLATION);
+    }
+
+    proc K::test_fairness_validator_passes_balanced_served_counts() -> UInt32 {
+        let status = validate_fairness_constraints(12, 10, 9, 4);
+        return expect_status(status, STATUS_OK);
+    }
+
+    proc K::test_scheduler_constraint_validation_combined() -> UInt32 {
+        let status = validate_scheduler_constraints(POLICY_DOMAIN_FAIR, 2, 3, 2, 10, 8, 9);
+        return expect_status(status, STATUS_OK);
+    }
+
+    proc K::run_all() -> UInt32 {
+        let t1 = test_policy_validation_accepts_known_policies();
+        if t1 == TEST_PASS {
+            let t2 = test_policy_validation_rejects_unknown_policy();
+            if t2 == TEST_PASS {
+                let t3 = test_replay_order_key_is_stable_for_same_input();
+                if t3 == TEST_PASS {
+                    let t4 = test_replay_validate_detects_mismatch();
+                    if t4 == TEST_PASS {
+                        let t5 = test_replay_validate_detects_match();
+                        if t5 == TEST_PASS {
+                            let t6 = test_arbitration_prefers_higher_priority();
+                            if t6 == TEST_PASS {
+                                let t7 = test_arbitration_tiebreak_is_replay_stable();
+                                if t7 == TEST_PASS {
+                                    let t8 = test_domain_fair_policy_boosts_starved_domain();
+                                    if t8 == TEST_PASS {
+                                        let t9 = test_starvation_validator_detects_risk();
+                                        if t9 == TEST_PASS {
+                                            let t10 = test_starvation_validator_passes_safe_waits();
+                                            if t10 == TEST_PASS {
+                                                let t11 = test_fairness_validator_detects_violation();
+                                                if t11 == TEST_PASS {
+                                                    let t12 = test_fairness_validator_passes_balanced_served_counts();
+                                                    if t12 == TEST_PASS {
+                                                        let t13 = test_scheduler_constraint_validation_combined();
+                                                        if t13 == TEST_PASS {
+                                                            return TEST_PASS;
+                                                        } else {
+                                                            return TEST_FAIL;
+                                                        }
+                                                    } else {
+                                                        return TEST_FAIL;
+                                                    }
+                                                } else {
+                                                    return TEST_FAIL;
+                                                }
+                                            } else {
+                                                return TEST_FAIL;
+                                            }
+                                        } else {
+                                            return TEST_FAIL;
+                                        }
+                                    } else {
+                                        return TEST_FAIL;
+                                    }
+                                } else {
+                                    return TEST_FAIL;
+                                }
+                            } else {
+                                return TEST_FAIL;
+                            }
+                        } else {
+                            return TEST_FAIL;
+                        }
+                    } else {
+                        return TEST_FAIL;
+                    }
+                } else {
+                    return TEST_FAIL;
+                }
+            } else {
+                return TEST_FAIL;
+            }
+        } else {
+            return TEST_FAIL;
+        }
+    }
 }

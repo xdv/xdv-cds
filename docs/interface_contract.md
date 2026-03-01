@@ -1,18 +1,39 @@
-﻿# Interface Contract
+# Interface Contract
 Project: XDV Cross-Domain Scheduler
-Specification: XDV-012
+Specification: XDV-012 / XDV-082
 Forge: XdvCds
+
 ## Versioning
 - Interface version: 0.1.0
-- Stability tier: stable-alpha
+- Arbitration API version: 1
+- Replay API version: 1
+- Fairness API version: 1
+- Stability tier: frozen_normative
+
 ## Contract Rules
-- Exported procedures must preserve deterministic behavior for identical inputs.
-- Return code semantics are part of the public contract and cannot change without a major version bump.
-- Domain tags, capability masks, and status constants are externally visible contract data.
-- New constants/procedures must be additive unless major-version upgrade is declared.
-## Current Public Files
-- src/cds.ds
-- src/cds_interface.ds
-## Migration Notes
-This project was split from xdv-kernel/sector/xdv_cds.
-Kernel integration paths should progressively switch from sector-local imports to versioned dependency usage.
+- Arbitration must be deterministic for identical inputs.
+- Policy plug-ins may adjust weighting/priority, but must not introduce randomness.
+- Tie-breaking is replay-stable.
+- Fairness and starvation checks return deterministic status codes.
+
+## Public Files
+- `src/cds.ds`
+- `src/cds_interface.ds`
+
+## Key Public APIs
+- `set_scheduler_policy(...)`
+- `arbitrate_next_domain(...)`
+- `schedule_tick_with_policy(...)`
+- `schedule_tick_replay(...)`
+- `compute_replay_order_key(...)`
+- `validate_starvation_constraints(...)`
+- `validate_fairness_constraints(...)`
+- `validate_scheduler_constraints(...)`
+
+## Stable Version APIs
+- `xdv_cds_interface_version_major()`
+- `xdv_cds_interface_version_minor()`
+- `xdv_cds_interface_version_patch()`
+- `xdv_cds_arbitration_api_version()`
+- `xdv_cds_replay_api_version()`
+- `xdv_cds_fairness_api_version()`

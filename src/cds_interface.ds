@@ -1,15 +1,47 @@
-﻿// File: cds_interface.ds
-// Stable interface surface for XDV Cross-Domain Scheduler
+// File: cds_interface.ds
+// Stable interface surface for XDV Cross-Domain Scheduler.
 forge XdvCdsInterface {
     const INTERFACE_VERSION_MAJOR: UInt32 = 0;
     const INTERFACE_VERSION_MINOR: UInt32 = 1;
     const INTERFACE_VERSION_PATCH: UInt32 = 0;
+
+    const ARBITRATION_API_VERSION: UInt32 = 1;
+    const REPLAY_API_VERSION: UInt32 = 1;
+    const FAIRNESS_API_VERSION: UInt32 = 1;
+
+    proc K::xdv_cds_interface_surface_version_major() -> UInt32 {
+        return INTERFACE_VERSION_MAJOR;
+    }
+
+    proc K::xdv_cds_interface_surface_version_minor() -> UInt32 {
+        return INTERFACE_VERSION_MINOR;
+    }
+
+    proc K::xdv_cds_interface_surface_version_patch() -> UInt32 {
+        return INTERFACE_VERSION_PATCH;
+    }
+
+    proc K::xdv_cds_arbitration_api_surface_version() -> UInt32 {
+        return ARBITRATION_API_VERSION;
+    }
+
+    proc K::xdv_cds_replay_api_surface_version() -> UInt32 {
+        return REPLAY_API_VERSION;
+    }
+
+    proc K::xdv_cds_fairness_api_surface_version() -> UInt32 {
+        return FAIRNESS_API_VERSION;
+    }
+
+    // Compatibility wrappers retained for existing callers.
     proc K::interface_version_major() -> UInt32 {
         return INTERFACE_VERSION_MAJOR;
     }
+
     proc K::interface_version_minor() -> UInt32 {
         return INTERFACE_VERSION_MINOR;
     }
+
     proc K::interface_version_patch() -> UInt32 {
         return INTERFACE_VERSION_PATCH;
     }

@@ -1,45 +1,60 @@
-﻿# XDV Cross-Domain Scheduler
-Version: 0.1.0
+# XDV Cross-Domain Scheduler
+Version: 0.1.1
 Status: active-split
 Language: Dust Programming Language (DPL)
+
 ## Specification Alignment
-Primary specification: XDV-012 in xdv-spec.
+- Primary: XDV-012 (Cross-Domain Scheduler)
+- Reference: XDV-082 (Cross-Domain Scheduler Reference)
+
 ## Purpose
-Standalone Cross-Domain Scheduler project for deterministic K/Q/Phi arbitration and policy control.
-This repository was split from xdv-kernel/sector/xdv_cds into a standalone project so interfaces can evolve independently under stable versioning.
-## Split Provenance
-- Source sector: xdv-kernel/sector/xdv_cds
-- Imported Dust modules: src/cds.ds and src/cds_tests.ds
-- Import model: source-copy split (non-destructive to existing kernel sector)
-## Stable Interface Contract
-This project defines a stable external interface boundary in:
-- src/cds_interface.ds
-- docs/interface_contract.md
-Compatibility model:
-- Semantic interface versioning (major/minor/patch)
-- Additive changes are minor releases
-- Breaking signature/semantic changes are major releases
-- Deprecated APIs remain one minor cycle before removal
-## Repository Layout
-- src/ : implementation and interface surfaces
-- tests/ : standalone tests and integration placeholders
-- docs/ : architecture and interface docs
-- State.toml : workspace manifest
-- changelog.md : release notes
-- LICENSE : copied from xdv-os/LICENSE
+`xdv-cds` is the deterministic arbitration engine for K/Q/Phi scheduling in XDV.
+It provides:
+- policy-driven deterministic arbitration,
+- replay-stable ordering keys,
+- starvation and fairness constraint validation.
+
+## Scope Implemented in 0.1.1
+- Deterministic arbitration API with policy plug-ins:
+  - round-robin, priority, EDF, coherence-aware, domain-fair.
+- Replay-stable ordering:
+  - deterministic order key generation,
+  - replay match/mismatch validation.
+- Fairness enforcement helpers:
+  - starvation detection,
+  - fairness skew validation,
+  - combined scheduler constraint validator.
+
 ## Public Surface
-- Forge module: XdvCds
-- Primary implementation: src/cds.ds
-- Stable interface profile: src/cds_interface.ds
-## Dependencies
-Planned dependencies:
-- xdv-dal, xdv-kernel, xdv-runtime
-- Dust toolchain and runtime packages required by integration profile
+Core module: `src/cds.ds`
+
+Key APIs:
+- `arbitrate_next_domain(...)`
+- `schedule_tick_with_policy(...)`
+- `schedule_tick_replay(...)`
+- `compute_replay_order_key(...)`
+- `validate_starvation_constraints(...)`
+- `validate_fairness_constraints(...)`
+- `validate_scheduler_constraints(...)`
+
+Version APIs:
+- `xdv_cds_interface_version_major()`
+- `xdv_cds_interface_version_minor()`
+- `xdv_cds_interface_version_patch()`
+- `xdv_cds_arbitration_api_version()`
+- `xdv_cds_replay_api_version()`
+- `xdv_cds_fairness_api_version()`
+
+## Repository Layout
+- `src/`: implementation, stable interface, tests
+- `docs/`: architecture and contract docs
+- `tests/`: standalone test suite placeholders
+- `State.toml`: workspace manifest
+- `changelog.md`: release notes
+
 ## Build
-dust check xdv-cds/src
-## Test
-dust test xdv-cds/tests
+`cargo run --manifest-path dust/Cargo.toml -- check xdv-cds/src`
+
 ## Integration Notes
-- Kernel integration should consume this project via explicit version pinning.
-- xdv-os integration should use release tags from this repo, not kernel-internal paths.
-- API changes must update docs/interface_contract.md and changelog.md in the same change set.
+- `xdv-kernel` consumes `xdv_cds_interface_version_*` from this project.
+- Arbitration and fairness decisions are deterministic and replay-compatible by construction.
